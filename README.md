@@ -19,7 +19,7 @@ Before you begin, ensure that you have the following software installed on your 
 2. Run the following command to clone the repository:
 
     ```sh
-    git clone https://github.com/Gml-Launcher/Gml.Client.git
+    git clone https://github.com/Nik497926/Gml.Client.git
     ```
 
 3. Navigate to the project directory:
@@ -77,7 +77,7 @@ If you'd like to contribute to the project, please fork the repository and creat
 adheres to the project's coding standards and passes all the tests.
 
 For any issues or feature requests, you can open an issue on
-the [GitHub Issues](https://github.com/Gml-Launcher/Gml.Client/issues) page of the repository.
+the [GitHub Issues](https://github.com/Nik497926/Gml.Client/issues) page of the repository.
 
 ## Additional Resources
 

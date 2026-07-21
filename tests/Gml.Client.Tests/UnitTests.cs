@@ -19,7 +19,7 @@ public class Tests
     public void Setup()
     {
         var localDirectory = Environment.CurrentDirectory;
-        var baseAddress = "https://gmlb.recloud.tech";
+        var baseAddress = "http://localhost:5000";
 
         Client = new GmlClientManager(localDirectory, baseAddress, new GameLoader(), "GmlLauncher", OsType.Linux);
 
