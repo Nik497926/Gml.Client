@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Gml.Client.GameLoader\Gml.Client.GameLoader.csproj" />
+    <ProjectReference Include="..\Gml.Client.Interfaces\Gml.Client.Interfaces.csproj" />
   </ItemGroup>
 
 </Project>

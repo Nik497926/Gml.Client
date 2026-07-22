@@ -17,6 +17,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Gml.Client.Interfaces;
+using Gml.Client.Models;
 using Gml.Dto.Files;
 using Gml.Dto.Messages;
 using Gml.Dto.Mods;
@@ -98,6 +99,11 @@ public class GmlClientManager : IGmlClientManager
     public Task<ResponseMessage<List<NewsReadDto>>> GetNews()
     {
         return _apiProcedures.GetNews();
+    }
+
+    public Task<ResponseMessage<UnicorePlayerCabinetDto>> GetMyUnicoreCabinet(string accessToken)
+    {
+        return _apiProcedures.GetMyUnicoreCabinet(accessToken);
     }
 
     public Task<ResponseMessage<List<ModReadDto>>> GetOptionalMods(string profileName, string accessToken)

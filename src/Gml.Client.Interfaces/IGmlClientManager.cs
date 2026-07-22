@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using Gml.Client.Models;
 using Gml.Dto.Files;
 using Gml.Dto.Messages;
 using Gml.Dto.Mods;
@@ -54,4 +55,5 @@ public interface IGmlClientManager : IDisposable
         CancellationToken cancellationToken = default);
 
     Task<ResponseMessage<List<NewsReadDto>>> GetNews();
+    Task<ResponseMessage<UnicorePlayerCabinetDto>> GetMyUnicoreCabinet(string accessToken);
 }

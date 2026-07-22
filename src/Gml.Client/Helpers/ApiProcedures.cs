@@ -911,6 +911,22 @@ public class ApiProcedures
                ?? new ResponseMessage<List<NewsReadDto>>();
     }
 
+    public async Task<ResponseMessage<UnicorePlayerCabinetDto>> GetMyUnicoreCabinet(string accessToken)
+    {
+#if DEBUG
+        Debug.WriteLine("Calling GetMyUnicoreCabinet()");
+#endif
+        _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+        var response = await _httpClient.GetAsync("/api/v1/users/me/unicore").ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+            return new ResponseMessage<UnicorePlayerCabinetDto>();
+
+        var content = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+        return JsonConvert.DeserializeObject<ResponseMessage<UnicorePlayerCabinetDto>>(content)
+               ?? new ResponseMessage<UnicorePlayerCabinetDto>();
+    }
+
     public static async Task<bool> CheckBackend(string hostUrl)
     {
 #if DEBUG
