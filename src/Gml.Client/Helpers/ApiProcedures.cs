@@ -475,12 +475,18 @@ public class ApiProcedures
         _finishedFilesCount = 0;
         _progressFilesCount = files.Length;
 
-        var throttler = new SemaphoreSlim(loadFilesPartCount);
-
         _maxFileCount.OnNext(_progressFilesCount);
 
-        var tasks = files.Select(file =>
-            DownloadFileWithRetry(installationDirectory, file, throttler, cancellationToken));
+        if (files.Length == 0)
+            return;
+
+        var throttler = new SemaphoreSlim(Math.Max(1, loadFilesPartCount));
+
+        // Сначала мелкие файлы: прогресс по количеству растёт быстрее, а крупные файлы
+        // не простаивают в конце очереди в одиночку
+        var tasks = files
+            .OrderBy(file => file.Size)
+            .Select(file => DownloadFileWithRetry(installationDirectory, file, throttler, cancellationToken));
 
         // Исполнение всех задач.
         await Task.WhenAll(tasks);
@@ -489,30 +495,28 @@ public class ApiProcedures
 #endif
     }
 
+    private const int DownloadAttempts = 5;
+
     private async Task DownloadFileWithRetry(string installationDirectory, ProfileFileReadDto file,
         SemaphoreSlim throttler, CancellationToken cancellationToken = default)
     {
-        // Try to download file up to 5 times
-        for (var attempt = 1; attempt <= 5; attempt++)
+        for (var attempt = 1; ; attempt++)
             try
             {
                 await DownloadFile(installationDirectory, file, throttler, cancellationToken);
                 return;
             }
-            catch (IOException ex)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-#if DEBUG
-                Debug.WriteLine($"IOException on attempt {attempt}: {ex.Message}");
-#endif
                 throw;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (attempt < DownloadAttempts)
             {
 #if DEBUG
-                Debug.WriteLine($"Exception on attempt {attempt}: {ex.Message}");
+                Debug.WriteLine($"Download attempt {attempt} failed for {file.Directory}: {ex.Message}");
 #endif
-                if (attempt == 3)
-                    throw;
+                // 0.5s, 1s, 2s, 4s
+                await Task.Delay(TimeSpan.FromMilliseconds(500 * Math.Pow(2, attempt - 1)), cancellationToken);
             }
     }
 
@@ -561,54 +565,77 @@ public class ApiProcedures
 
             var url = $"{_httpClient.BaseAddress.AbsoluteUri}api/v1/file/{file.Hash}";
 
-            await using (var fs = new FileStream(localPath, FileMode.Create))
+            // Качаем во временный файл и подменяем целиком: оборванная загрузка больше не оставляет
+            // «битый» файл, который при следующем запуске снова приходится перепроверять и перекачивать
+            var tempPath = localPath + ".gmldownload";
+            long written = 0;
+            long reportedDelta = 0;
+
+            try
             {
-                using (var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken))
+                using (var fs = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None,
+                           DownloadBufferSize, useAsync: true))
+                using (var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead,
+                           cancellationToken))
                 {
                     response.EnsureSuccessStatusCode();
                     using var stream = await response.Content.ReadAsStreamAsync();
-                    var buffer = new byte[81920];
+                    var buffer = new byte[DownloadBufferSize];
                     int read;
                     while ((read = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
                     {
                         await fs.WriteAsync(buffer, 0, read, cancellationToken);
+                        written += read;
+                        reportedDelta += read;
                         _downloadedBytesDelta.OnNext(read);
                     }
                 }
 
-                #if DEBUG
-                if (fs.Length != file.Size)
-                {
-                    SentrySdk.CaptureException(new Exception($"Файл не был полностью загружен: {file.Directory}"));
-                }
-                #endif
+                if (file.Size > 0 && written != file.Size)
+                    throw new IOException(
+                        $"Файл не был полностью загружен: {file.Directory} ({written}/{file.Size} байт)");
+
+                ReplaceFile(tempPath, localPath);
+            }
+            catch
+            {
+                TryDelete(tempPath);
+                // Откатываем байты неудачной попытки, чтобы общий прогресс не «перескакивал» 100%
+                if (reportedDelta > 0)
+                    _downloadedBytesDelta.OnNext(-reportedDelta);
+                throw;
             }
 
-            _finishedFilesCount++;
-            _progress = Convert.ToInt16(_finishedFilesCount * 100 / _progressFilesCount);
+            var finished = Interlocked.Increment(ref _finishedFilesCount);
+            _progress = Convert.ToInt16(finished * 100 / Math.Max(1, _progressFilesCount));
             _progressChanged.OnNext(_progress);
-            _loadedFilesCount.OnNext(_finishedFilesCount);
-#if DEBUG
-            //Debug.WriteLine($"{_finishedFilesCount}/{_progressFilesCount} files downloaded [{file.Directory}].");
-#endif
-        }
-        catch (IOException ex)
-        {
-#if DEBUG
-            Debug.WriteLine($"IOException during download {file.Directory}: {ex.Message}");
-#endif
-            throw;
-        }
-        catch (Exception ex)
-        {
-#if DEBUG
-            Debug.WriteLine($"Exception during download {file.Directory}: {ex.Message}");
-#endif
-            Console.WriteLine(ex);
+            _loadedFilesCount.OnNext(finished);
         }
         finally
         {
             throttler.Release();
+        }
+    }
+
+    private const int DownloadBufferSize = 128 * 1024;
+
+    private static void ReplaceFile(string source, string destination)
+    {
+        if (File.Exists(destination))
+            File.Delete(destination);
+        File.Move(source, destination);
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+        catch
+        {
+            // ignored
         }
     }
 
@@ -932,22 +959,29 @@ public class ApiProcedures
 #if DEBUG
         Debug.WriteLine("Calling CheckBackend()");
 #endif
-        using var client = new HttpClient();
-        var response = await client.GetAsync($"{hostUrl}").ConfigureAwait(false);
-
-        if (!response.IsSuccessStatusCode)
+        // Без таймаута недоступный бэкенд держал сплэш до 2×100 секунд
+        using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        try
         {
-            response = await client.GetAsync($"{hostUrl}/health").ConfigureAwait(false);
-        }
+            using var response = await client.GetAsync($"{hostUrl}").ConfigureAwait(false);
+            if (response.IsSuccessStatusCode)
+                return true;
 
-        Debug.WriteLine(response.IsSuccessStatusCode ? "Success check" : "Failed check");
-
+            using var health = await client.GetAsync($"{hostUrl.TrimEnd('/')}/health").ConfigureAwait(false);
 #if DEBUG
-        Debug.WriteLine(response.IsSuccessStatusCode
-            ? $"Backend pinged successfully {response.StatusCode}"
-            : "Failed ping");
+            Debug.WriteLine(health.IsSuccessStatusCode
+                ? $"Backend pinged successfully {health.StatusCode}"
+                : "Failed ping");
 #endif
-        return response.IsSuccessStatusCode;
+            return health.IsSuccessStatusCode;
+        }
+        catch (Exception exception) when (exception is HttpRequestException or TaskCanceledException)
+        {
+#if DEBUG
+            Debug.WriteLine($"Backend check failed: {exception.Message}");
+#endif
+            return false;
+        }
     }
 
     public async Task<string?> ReadJsonResponse(string directory, string fileName = "response")

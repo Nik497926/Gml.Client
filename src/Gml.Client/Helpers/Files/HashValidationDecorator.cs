@@ -1,7 +1,7 @@
+using System;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
-using System.Security.Cryptography;
 using System.Threading.Tasks;
 using Gml.Dto.Files;
 using Gml.Dto.Profile;
@@ -21,78 +21,73 @@ public class HashValidationDecorator : IFileUpdateHandler
     {
         var result = await _handler.ValidateFilesAsync(profileInfo, rootDirectory);
         var filesToUpdate = new ConcurrentBag<ProfileFileReadDto>();
-        var filesToDelete = new ConcurrentDictionary<string, ProfileFileReadDto>(
-            result.FilesToDelete.ToDictionary(
-                f => SystemIoProcedures.NormalizePath(f.Directory),
-                f => f
-            )
-        );
-        var files = result.FilesToUpdate.ToList();
+        var filesToDelete = new ConcurrentDictionary<string, ProfileFileReadDto>(StringComparer.OrdinalIgnoreCase);
+        foreach (var file in result.FilesToDelete)
+            filesToDelete[SystemIoProcedures.NormalizePath(file.Directory)] = file;
 
-        await Task.WhenAll(files.Select(async serverFile =>
-        {
+        var serverFiles = result.FilesToUpdate.ToList();
+        var cache = FileHashCache.Load(rootDirectory);
 
-            filesToDelete.TryGetValue(SystemIoProcedures.NormalizePath(serverFile.Directory), out var localFile);
-
-            if (localFile is null)
+        // Раньше здесь был Task.WhenAll с синхронной лямбдой — фактически последовательное
+        // чтение всех файлов. Теперь проверка идёт параллельно и с кэшем хешей.
+        await Task.Run(() => Parallel.ForEach(
+            serverFiles,
+            new ParallelOptions { MaxDegreeOfParallelism = Math.Max(2, Environment.ProcessorCount) },
+            serverFile =>
             {
-                var localPath = Path.Combine(rootDirectory, SystemIoProcedures.NormalizePath(serverFile.Directory));
+                var key = SystemIoProcedures.NormalizePath(serverFile.Directory);
+                var localPath = Path.Combine(rootDirectory, key);
 
-                if (File.Exists(localPath))
+                // Отключённый опциональный мод лежит как *.jar.disabled — это тот же файл,
+                // его не нужно ни удалять, ни перекачивать при каждом запуске
+                if (!File.Exists(localPath)
+                    && ApiProcedures.IsOptionalMod(localPath)
+                    && File.Exists(localPath + ".disabled"))
                 {
-                    var fileInfo = new FileInfo(localPath);
-                    // Сначала проверяем размер
-                    if (fileInfo.Length == serverFile.Size)
-                    {
-                        // Размеры совпадают - проверяем хеш
-                        localFile = new ProfileFileReadDto
-                        {
-                            Name = serverFile.Name,
-                            Directory = serverFile.Directory,
-                            Size = fileInfo.Length,
-                        };
-                    }
-                    else
-                    {
-                        // Размеры не совпадают - сразу добавляем в список на обновление
-                        filesToUpdate.Add(serverFile);
-                        return;
-                    }
+                    localPath += ".disabled";
+                    filesToDelete.TryRemove(key + ".disabled", out _);
                 }
-            }
 
-            if (localFile == null)
-            {
-                // Файла нет локально - нужно скачать
-                filesToUpdate.Add(serverFile);
-            }
-            else if (localFile.Size == serverFile.Size)
-            {
-                // Размеры совпадают - проверяем хеш
-                using var algorithm = SHA1.Create();
-                var localPath = Path.Combine(rootDirectory, SystemIoProcedures.NormalizePath(serverFile.Directory));
-                if (!localPath.StartsWith(Path.Combine(rootDirectory, "assets")) &&
-                    SystemHelper.CalculateFileHash(localPath, algorithm) != serverFile.Hash)
+                var info = new FileInfo(localPath);
+                if (!info.Exists)
                 {
                     filesToUpdate.Add(serverFile);
-                    filesToDelete.TryRemove(SystemIoProcedures.NormalizePath(localFile.Directory), out _);
+                    return;
                 }
-                else
-                {
-                    // Файл актуален - исключаем из списка на удаление
-                    filesToDelete.TryRemove(SystemIoProcedures.NormalizePath(localFile.Directory), out _);
-                }
-            }
-            else
-            {
-                // Размеры не совпадают - нужно обновить
-                filesToUpdate.Add(serverFile);
-                filesToDelete.TryRemove(SystemIoProcedures.NormalizePath(localFile.Directory), out _);
-            }
-        }));
 
-        result.FilesToUpdate = filesToUpdate;
-        result.FilesToDelete = filesToDelete.Values;
+                // Файл есть на сервере — удалять его не нужно: он либо актуален, либо будет перезаписан
+                filesToDelete.TryRemove(key, out _);
+
+                if (info.Length != serverFile.Size)
+                {
+                    filesToUpdate.Add(serverFile);
+                    return;
+                }
+
+                if (string.IsNullOrEmpty(serverFile.Hash))
+                    return;
+
+                try
+                {
+                    var localHash = cache.GetOrCompute(info);
+                    if (!string.Equals(localHash, serverFile.Hash, StringComparison.OrdinalIgnoreCase))
+                        filesToUpdate.Add(serverFile);
+                }
+                catch (IOException)
+                {
+                    // Файл занят (например, запущенной игрой) — пробуем перекачать
+                    filesToUpdate.Add(serverFile);
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    filesToUpdate.Add(serverFile);
+                }
+            }));
+
+        cache.Save();
+
+        result.FilesToUpdate = filesToUpdate.ToList();
+        result.FilesToDelete = filesToDelete.Values.ToList();
         return result;
     }
 }

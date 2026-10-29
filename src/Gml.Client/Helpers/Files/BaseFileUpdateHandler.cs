@@ -1,4 +1,5 @@
-
+using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -10,63 +11,77 @@ namespace Gml.Client.Helpers.Files;
 
 public class BaseFileUpdateHandler : IFileUpdateHandler
 {
-    public virtual async Task<FileValidationResult> ValidateFilesAsync(
+    private static readonly string[] IgnoredFileNames =
+    [
+        ".gml-hash-cache.json",
+        ".gml-hash-cache.json.tmp",
+        "theme.json"
+    ];
+
+    public virtual Task<FileValidationResult> ValidateFilesAsync(
         ProfileReadInfoDto profileInfo,
         string rootDirectory)
     {
-        var localFiles = new List<ProfileFileReadDto>();
         var profilePath = Path.Combine(rootDirectory, profileInfo.ReleativePath);
 
         if (!Directory.Exists(profilePath))
         {
-            return new FileValidationResult
+            return Task.FromResult(new FileValidationResult
             {
-                FilesToDelete = localFiles,
+                FilesToDelete = [],
                 FilesToUpdate = profileInfo.Files
-            };
-
-        }
-
-        var files = Directory.Exists(profilePath)
-            ? Directory.GetFiles(profilePath, "*.*", SearchOption.AllDirectories)
-            : [];
-
-        var assetsPath = Path.Combine(rootDirectory, "shared data", "assets");
-        var assetsFiles = Directory.Exists(assetsPath)
-            ? Directory.GetFiles(assetsPath, "*.*", SearchOption.AllDirectories)
-            : [];
-
-        var runtimePath = Path.Combine(rootDirectory, "shared data", "runtime");
-        var runtimeFiles = Directory.Exists(runtimePath)
-            ? Directory.GetFiles(runtimePath, "*.*", SearchOption.AllDirectories)
-            : [];
-
-        foreach (var filePath in files.Concat(assetsFiles).Concat(runtimeFiles))
-        {
-            var relativePath = Path.GetRelativePath(rootDirectory, filePath);
-            var fileInfo = new FileInfo(filePath);
-            // Используем Path.DirectorySeparatorChar для нормализации пути
-
-            var directory = Path.Combine(
-                Path.GetDirectoryName(relativePath)?.Replace('\\', Path.DirectorySeparatorChar)
-                    .Replace('/', Path.DirectorySeparatorChar)
-                ?? string.Empty,
-                fileInfo.Name);
-
-            localFiles.Add(new ProfileFileReadDto
-            {
-                Name = fileInfo.Name,
-                Directory = Path.DirectorySeparatorChar + SystemIoProcedures.NormalizePath(directory),
-                Size = fileInfo.Length,
             });
         }
 
-        var result = new FileValidationResult
-        {
-            FilesToDelete = localFiles,
-            FilesToUpdate = profileInfo.Files
-        };
+        var roots = new List<string> { profilePath };
+        var assetsPath = Path.Combine(rootDirectory, "shared data", "assets");
+        var runtimePath = Path.Combine(rootDirectory, "shared data", "runtime");
+        if (Directory.Exists(assetsPath)) roots.Add(assetsPath);
+        if (Directory.Exists(runtimePath)) roots.Add(runtimePath);
 
-        return result;
+        var localFiles = new ConcurrentBag<ProfileFileReadDto>();
+
+        // Параллельный обход каталогов — на больших клиентах (assets/runtime) это заметно быстрее
+        Parallel.ForEach(roots, root =>
+        {
+            foreach (var filePath in Directory.EnumerateFiles(root, "*.*", SearchOption.AllDirectories))
+            {
+                var fileInfo = new FileInfo(filePath);
+                if (ShouldIgnoreLocalFile(fileInfo))
+                    continue;
+
+                var relativePath = Path.GetRelativePath(rootDirectory, filePath);
+                var directory = Path.Combine(
+                    Path.GetDirectoryName(relativePath)?.Replace('\\', Path.DirectorySeparatorChar)
+                        .Replace('/', Path.DirectorySeparatorChar)
+                    ?? string.Empty,
+                    fileInfo.Name);
+
+                localFiles.Add(new ProfileFileReadDto
+                {
+                    Name = fileInfo.Name,
+                    Directory = Path.DirectorySeparatorChar + SystemIoProcedures.NormalizePath(directory),
+                    Size = fileInfo.Length,
+                });
+            }
+        });
+
+        return Task.FromResult(new FileValidationResult
+        {
+            FilesToDelete = localFiles.ToList(),
+            FilesToUpdate = profileInfo.Files
+        });
+    }
+
+    private static bool ShouldIgnoreLocalFile(FileInfo fileInfo)
+    {
+        if (IgnoredFileNames.Contains(fileInfo.Name, StringComparer.OrdinalIgnoreCase))
+            return true;
+
+        // Незавершённые загрузки и disabled-моды обрабатываются отдельно
+        if (fileInfo.Name.EndsWith(".gmldownload", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return false;
     }
 }
