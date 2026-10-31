@@ -94,10 +94,21 @@ public class SystemIoProcedures
         {
             List<string> allowedPaths = [];
 
-            allowedPaths.AddRange(profileInfo.WhiteListFolders.Select(path =>
-                Path.GetFullPath(Path.Combine(_installationDirectory, "game data", profileInfo.ProfileName,
-                    Path.Combine(path.Path.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries)))))
-            );
+            // Путь из whitelist может быть уже полным относительно установки
+            // (game data/beta/xaero) или коротким относительно профиля (xaero).
+            allowedPaths.AddRange(profileInfo.WhiteListFolders.Select(folder =>
+            {
+                var relative = NormalizePath(folder.Path);
+                var profileRoot = NormalizePath(profileInfo.ReleativePath ?? string.Empty);
+                if (!string.IsNullOrEmpty(profileRoot)
+                    && !relative.StartsWith(profileRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+                    && !relative.Equals(profileRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    relative = NormalizePath(Path.Combine(profileRoot, relative));
+                }
+
+                return Path.GetFullPath(Path.Combine(_installationDirectory, relative));
+            }));
 
             var profilePath =
                 Path.GetFullPath(Path.Combine(_installationDirectory, profileInfo.ReleativePath));

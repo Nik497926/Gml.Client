@@ -38,8 +38,15 @@ public class WhiteListFileDecorator : IFileUpdateHandler
 
     internal static bool LocalFileExists(ProfileFileReadDto file, string rootDirectory)
     {
-        var fullPath = Path.Combine(rootDirectory, SystemIoProcedures.NormalizePath(file.Directory));
+        var relative = SystemIoProcedures.NormalizePath(file.Directory);
+        var fullPath = Path.Combine(rootDirectory, relative);
         // Для опциональных модов файл может быть сохранен с суффиксом ".disabled"
-        return File.Exists(fullPath) || File.Exists(fullPath + ".disabled");
+        if (File.Exists(fullPath) || File.Exists(fullPath + ".disabled"))
+            return true;
+
+        // На всякий случай: путь с другим разделителем / ведущим слэшем
+        var alt = Path.Combine(rootDirectory, relative.Replace('\\', '/').TrimStart('/').Replace('/', Path.DirectorySeparatorChar));
+        return !string.Equals(alt, fullPath, StringComparison.OrdinalIgnoreCase)
+               && (File.Exists(alt) || File.Exists(alt + ".disabled"));
     }
 }

@@ -100,6 +100,71 @@ public class FileValidationTests
         Assert.That(toDelete, Is.Empty);
     }
 
+    [TestCase("game data/beta/options.txt")]
+    [TestCase("/game data/beta/options.txt")]
+    [TestCase("\\game data\\beta\\options.txt")]
+    [TestCase("options.txt")]
+    public async Task WhiteListedFile_GameDataStylePaths_AreKept(string whiteListPath)
+    {
+        const string root = "game data/beta";
+        var server = new ProfileFileReadDto
+        {
+            Name = "options.txt",
+            Directory = $"/{root}/options.txt",
+            Size = 6,
+            Hash = Convert.ToHexString(SHA1.HashData("server"u8.ToArray())).ToLowerInvariant()
+        };
+        WriteLocal($"{root}/options.txt", "player");
+
+        var profile = new ProfileReadInfoDto
+        {
+            ProfileName = "beta",
+            ReleativePath = root,
+            Files = [server],
+            WhiteListFiles =
+            [
+                new ProfileFileReadDto { Name = "options.txt", Directory = whiteListPath }
+            ],
+            WhiteListFolders = []
+        };
+
+        var (toUpdate, toDelete) = await Validate(profile);
+
+        Assert.That(toUpdate, Is.Empty);
+        Assert.That(toDelete, Is.Empty);
+    }
+
+    [TestCase("game data/beta/xaero")]
+    [TestCase("/game data/beta/xaero")]
+    [TestCase("xaero")]
+    public async Task WhiteListedFolder_GameDataStylePaths_AreKept(string folder)
+    {
+        const string root = "game data/beta";
+        var server = new ProfileFileReadDto
+        {
+            Name = "waypoints.txt",
+            Directory = $"{root}/xaero/waypoints.txt",
+            Size = 6,
+            Hash = Convert.ToHexString(SHA1.HashData("server"u8.ToArray())).ToLowerInvariant()
+        };
+        WriteLocal($"{root}/xaero/waypoints.txt", "player");
+        WriteLocal($"{root}/xaero/extra.txt", "extra");
+
+        var profile = new ProfileReadInfoDto
+        {
+            ProfileName = "beta",
+            ReleativePath = root,
+            Files = [server],
+            WhiteListFiles = [],
+            WhiteListFolders = [new ProfileFolderReadDto { Path = folder }]
+        };
+
+        var (toUpdate, toDelete) = await Validate(profile);
+
+        Assert.That(toUpdate, Is.Empty);
+        Assert.That(toDelete, Is.Empty);
+    }
+
     [Test]
     public async Task NotWhiteListed_ChangedAndExtraFiles_AreFixed()
     {
